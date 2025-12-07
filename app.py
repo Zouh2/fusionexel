@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
-import tempfile
 from io import BytesIO
+
 
 # -----------------------------------------------------
 #              LOGIQUE DE TRAITEMENT EXCEL
@@ -23,16 +23,30 @@ def traiter_fichier(file):
             cols.append(f"{c}_{counts[c]}")
     df.columns = cols
 
-    # Formatage dates → dd/mm/YYYY
+    # ---- Correction : formater uniquement les VRAIES dates ----
     def format_value(v):
         if pd.isna(v):
             return v
+
+        # Si Timestamp
         if isinstance(v, pd.Timestamp):
             return v.strftime("%d/%m/%Y")
-        try:
-            return pd.to_datetime(v).strftime("%d/%m/%Y")
-        except:
+
+        # Si String ressemblant à une date
+        if isinstance(v, str):
+            date_formats = ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"]
+            for fmt in date_formats:
+                try:
+                    return pd.to_datetime(v, format=fmt).strftime("%d/%m/%Y")
+                except:
+                    pass
+            return v  # garder chaine texte
+
+        # Si chiffre → NE PAS CONVERTIR
+        if isinstance(v, (int, float)):
             return v
+
+        return v
 
     df = df.applymap(format_value)
 
@@ -85,19 +99,19 @@ st.set_page_config(
 st.title("📊 Fusion Ressources Excel")
 st.subheader("Convertir et fusionner les ressources automatiquement")
 
-uploaded = st.file_uploader("📂 Uploader ton fichier Excel INPUT.xlsx", type=['xlsx'])
+uploaded = st.file_uploader("📂 Uploader ton fichier Excel (INPUT.xlsx)", type=['xlsx'])
 
 if uploaded:
     if st.button("🚀 Lancer le traitement"):
         with st.spinner("Traitement en cours..."):
             df = traiter_fichier(uploaded)
 
-            # Stocker fichier output
+            # Export fichier
             output = BytesIO()
             df.to_excel(output, index=False)
             output.seek(0)
 
-            st.success("✔ Traitement terminé, ton fichier est prêt !")
+            st.success("✔ Fichier généré avec succès")
 
             st.download_button(
                 "⬇ Télécharger OUTPUT.xlsx",
@@ -106,6 +120,7 @@ if uploaded:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
-            st.dataframe(df.head(20))
+            st.write("📄 Aperçu du résultat :")
+            st.dataframe(df.head(30))
 else:
     st.info("👆 Import un fichier pour commencer")
