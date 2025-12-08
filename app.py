@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 
-
 # -----------------------------------------------------
 #              LOGIQUE DE TRAITEMENT EXCEL
 # -----------------------------------------------------
@@ -10,9 +9,16 @@ def traiter_fichier(file):
     START_COL = "Resource"
     id_col = "External ID"
 
+    # Lecture Excel
     df = pd.read_excel(file)
 
-    # Rendre colonnes uniques
+    # Vérifier colonnes obligatoires
+    if START_COL not in df.columns:
+        raise Exception(f"Colonne '{START_COL}' introuvable dans le fichier.")
+    if id_col not in df.columns:
+        raise Exception(f"Colonne '{id_col}' introuvable dans le fichier.")
+
+    # --- Rendre les colonnes uniques (en cas de doublons) ---
     cols, counts = [], {}
     for c in df.columns:
         if c not in counts:
@@ -21,71 +27,62 @@ def traiter_fichier(file):
         else:
             counts[c] += 1
             cols.append(f"{c}_{counts[c]}")
+    df = df.copy()
     df.columns = cols
 
-    # ---- Correction : formater uniquement les VRAIES dates ----
+    # --- Formater seulement les vraies dates (Timestamp) ---
     def format_value(v):
         if pd.isna(v):
             return v
-
-        # Si Timestamp
         if isinstance(v, pd.Timestamp):
+            # On convertit juste les datetime en string dd/mm/YYYY
             return v.strftime("%d/%m/%Y")
-
-        # Si String ressemblant à une date
-        if isinstance(v, str):
-            date_formats = ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"]
-            for fmt in date_formats:
-                try:
-                    return pd.to_datetime(v, format=fmt).strftime("%d/%m/%Y")
-                except:
-                    pass
-            return v  # garder chaine texte
-
-        # Si chiffre → NE PAS CONVERTIR
-        if isinstance(v, (int, float)):
-            return v
-
-        return v
+        return v  # on ne touche pas aux nombres / strings
 
     df = df.applymap(format_value)
 
-    # Séparation colonnes
+    # --- Séparer colonnes fixes / colonnes à étendre ---
     start_index = df.columns.tolist().index(START_COL)
-    fixed_cols = df.columns.tolist()[:start_index]
-    expand_cols = df.columns.tolist()[start_index:]
+    fixed_cols = df.columns[:start_index]
+    expand_cols = df.columns[start_index:]
 
-    # Base par External ID
+    # Forcer External ID en string pour éviter les soucis au merge
+    df[id_col] = df[id_col].astype(str)
+
+    # Base = 1 ligne par External ID, avec les colonnes fixes
     base = df.groupby(id_col, as_index=False).first()[fixed_cols]
 
-    # Fusion ressources → horizontal
+    # --- Fusion horizontale des ressources ---
     def expand(group):
         rows = group[expand_cols]
-        if len(rows) == 1:
-            return rows.iloc[0]
         values = []
-        for _, row in rows.iterrows():
-            values.extend(row.tolist())
+        for _, r in rows.iterrows():
+            values.extend(r.tolist())
+        # Une seule Series par External ID : [Res1, Work1, Units1, ..., ResN, WorkN, UnitsN...]
         return pd.Series(values)
 
-    expanded = df.groupby(id_col, group_keys=False).apply(expand)
+    expanded = df.groupby(id_col).apply(expand)
 
-    # Renommer si plusieurs blocs
-    if expanded.shape[1] > len(expand_cols):
-        new_cols = []
-        for i in range(expanded.shape[1]):
-            base_col = expand_cols[i % len(expand_cols)]
-            index = (i // len(expand_cols)) + 1
-            new_cols.append(f"{base_col}_{index}")
-        expanded.columns = new_cols
-    else:
-        expanded.columns = expand_cols
+    # ⚠️ Avec les versions récentes de pandas, groupby+apply renvoie une Series à multi-index.
+    # On la remet en DataFrame "classique" avec unstack().
+    if isinstance(expanded, pd.Series):
+        expanded = expanded.unstack()
 
     expanded = expanded.reset_index()
+
+    # --- Renommer les colonnes générées : Resource_1, Resource Estimated Work_1, etc. ---
+    new_cols = [id_col]
+    for i in range(1, len(expanded.columns)):
+        idx = (i - 1) % len(expand_cols)          # position dans le bloc (Resource, Work, Units, ...)
+        rep = (i - 1) // len(expand_cols) + 1     # n° du bloc (1, 2, 3, ...)
+        new_cols.append(f"{expand_cols[idx]}_{rep}")
+
+    expanded.columns = new_cols
+
+    # --- Fusion finale : colonnes fixes + colonnes ressources étendues ---
     result = base.merge(expanded, on=id_col, how="left")
 
     return result
-
 
 # -----------------------------------------------------
 #                    UI STREAMLIT
@@ -97,30 +94,45 @@ st.set_page_config(
 )
 
 st.title("📊 Fusion Ressources Excel")
-st.subheader("Convertir et fusionner les ressources automatiquement")
+st.subheader("Fusionner les ressources par External ID (1 ligne par tâche/projet)")
 
-uploaded = st.file_uploader("📂 Uploader ton fichier Excel (INPUT.xlsx)", type=['xlsx'])
+uploaded = st.file_uploader("📂 Uploader ton fichier Excel (export des tâches)", type=['xlsx'])
 
 if uploaded:
     if st.button("🚀 Lancer le traitement"):
         with st.spinner("Traitement en cours..."):
-            df = traiter_fichier(uploaded)
+            try:
+                df_result = traiter_fichier(uploaded)
 
-            # Export fichier
-            output = BytesIO()
-            df.to_excel(output, index=False)
-            output.seek(0)
+                # Export dans un fichier Excel en mémoire
+                output = BytesIO()
+                df_result.to_excel(output, index=False)
+                output.seek(0)
 
-            st.success("✔ Fichier généré avec succès")
+                st.success("✔ Fichier généré avec succès")
 
-            st.download_button(
-                "⬇ Télécharger OUTPUT.xlsx",
-                data=output,
-                file_name="OUTPUT.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+                # Statistiques
+                nb_rows = len(df_result)
+                nb_resource_cols = sum(
+                    1 for col in df_result.columns
+                    if col.startswith("Resource") and col != "Resource"
+                )
 
-            st.write("📄 Aperçu du résultat :")
-            st.dataframe(df.head(30))
+                st.info(f"📊 **{nb_rows}** lignes (External ID uniques) | **{nb_resource_cols}** colonnes de ressources")
+
+                # Bouton de téléchargement
+                st.download_button(
+                    "⬇ Télécharger OUTPUT.xlsx",
+                    data=output,
+                    file_name="OUTPUT.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+                # Aperçu
+                st.write("📄 Aperçu du résultat :")
+                st.dataframe(df_result.head(20))
+
+            except Exception as e:
+                st.error(f"❌ Erreur lors du traitement : {str(e)}")
 else:
-    st.info("👆 Import un fichier pour commencer")
+    st.info("👆 Import un fichier pour commencer.")
